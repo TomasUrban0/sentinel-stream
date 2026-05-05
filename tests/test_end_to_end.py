@@ -25,7 +25,7 @@ def test_full_pipeline_flags_injected_anomalies():
     base[anomaly_idx] += rng.normal(loc=4.0, scale=0.5, size=base[anomaly_idx].shape)
     labels[anomaly_idx] = 1
 
-    transformer = StreamingFeatureTransformer()
+    transformer = StreamingFeatureTransformer(spectral_channels=())
     base_ts = datetime(2025, 1, 1, tzinfo=UTC)
 
     feature_rows: list[np.ndarray] = []
@@ -41,6 +41,7 @@ def test_full_pipeline_flags_injected_anomalies():
     x = np.vstack(feature_rows)
     y = np.array(label_rows)
     assert x.shape[0] > 1500
+    assert x.shape[1] == len(transformer.feature_columns)
     assert y.sum() > 0
 
     detector = IsolationForestDetector(n_estimators=80, contamination=0.05, random_state=0)

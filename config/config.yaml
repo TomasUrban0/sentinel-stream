@@ -10,6 +10,12 @@ data:
     - volume_flow_rate
   rolling_windows: [5, 30]
   lag_steps: [1, 5]
+  # Optional FFT-based spectral features (disabled by default after empirical
+  # evaluation degraded both detectors on SKAB — see README "Experiments tried").
+  spectral:
+    channels: []
+    window: 64
+    bands: 4
 
 model:
   autoencoder:

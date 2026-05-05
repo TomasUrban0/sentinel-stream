@@ -38,10 +38,14 @@ async def lifespan(app: FastAPI):
     model_name = os.environ.get("SENTINEL_MODEL", config["api"]["default_model"])
 
     app.state.config = config
+    spectral_cfg = config["data"].get("spectral", {})
     app.state.transformer = StreamingFeatureTransformer(
         base_features=tuple(config["data"]["features"]),
         rolling_windows=tuple(config["data"]["rolling_windows"]),
         lag_steps=tuple(config["data"]["lag_steps"]),
+        spectral_channels=tuple(spectral_cfg.get("channels", [])),
+        spectral_window=int(spectral_cfg.get("window", 64)),
+        spectral_bands=int(spectral_cfg.get("bands", 4)),
     )
     app.state.metrics = MetricsRegistry()
     app.state.model_name = model_name

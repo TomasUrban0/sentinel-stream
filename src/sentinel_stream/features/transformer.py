@@ -2,7 +2,8 @@
 
 Maintains a rolling buffer of the most recent observations so that the
 feature set produced for a single incoming record matches what the
-PySpark pipeline produced at training time.
+PySpark pipeline produced at training time, including the FFT-based
+spectral features computed on the accelerometer channels.
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from datetime import UTC, datetime
 import numpy as np
 import pandas as pd
 
-from .engineering import BASE_FEATURES, feature_columns
+from .engineering import BASE_FEATURES, DEFAULT_SPECTRAL_CHANNELS, feature_columns
+from .spectral import DEFAULT_BANDS, DEFAULT_WINDOW, compute_spectral_features
 
 
 @dataclass
@@ -24,26 +26,43 @@ class StreamingFeatureTransformer:
     base_features: tuple[str, ...] = BASE_FEATURES
     rolling_windows: tuple[int, ...] = (5, 30)
     lag_steps: tuple[int, ...] = (1, 5)
-    _buffer: deque[dict[str, float]] = field(default_factory=lambda: deque(maxlen=64))
-    _timestamps: deque[datetime] = field(default_factory=lambda: deque(maxlen=64))
+    spectral_channels: tuple[str, ...] = DEFAULT_SPECTRAL_CHANNELS
+    spectral_window: int = DEFAULT_WINDOW
+    spectral_bands: int = DEFAULT_BANDS
+    _buffer: deque[dict[str, float]] = field(default_factory=deque)
+    _timestamps: deque[datetime] = field(default_factory=deque)
 
     def __post_init__(self) -> None:
-        max_history = max(max(self.rolling_windows), max(self.lag_steps))
+        spectral_required = self.spectral_window if self.spectral_channels else 0
+        max_history = max(
+            max(self.rolling_windows),
+            max(self.lag_steps) + 1,
+            spectral_required,
+        )
         self._buffer = deque(maxlen=max_history)
         self._timestamps = deque(maxlen=max_history)
 
     @property
     def feature_columns(self) -> list[str]:
-        return feature_columns(self.base_features, self.rolling_windows, self.lag_steps)
+        return feature_columns(
+            self.base_features,
+            self.rolling_windows,
+            self.lag_steps,
+            self.spectral_channels,
+            self.spectral_bands,
+        )
 
     def push(self, record: dict[str, float], timestamp: datetime | None = None) -> None:
-        """Append a new observation to the buffer."""
         self._buffer.append({k: float(record[k]) for k in self.base_features})
         self._timestamps.append(timestamp or datetime.now(UTC))
 
     def transform(self) -> np.ndarray | None:
-        """Return the feature vector for the latest record, or ``None`` if not enough history."""
-        required = max(max(self.rolling_windows), max(self.lag_steps))
+        spectral_required = self.spectral_window if self.spectral_channels else 0
+        required = max(
+            max(self.rolling_windows),
+            max(self.lag_steps) + 1,
+            spectral_required,
+        )
         if len(self._buffer) < required:
             return None
 
@@ -62,7 +81,15 @@ class StreamingFeatureTransformer:
 
         ts = self._timestamps[-1]
         out["hour"] = ts.hour
-        # Match Spark's dayofweek() convention (Sunday = 1 .. Saturday = 7).
         out["dayofweek"] = (ts.weekday() + 1) % 7 + 1
+
+        from .spectral import spectral_feature_names
+
+        spec_names = spectral_feature_names(self.spectral_bands)
+        for ch in self.spectral_channels:
+            window_values = df[ch].iloc[-self.spectral_window :].to_numpy()
+            spec_vec = compute_spectral_features(window_values, n_bands=self.spectral_bands)
+            for name, value in zip(spec_names, spec_vec, strict=True):
+                out[f"{ch}_spec_{name}"] = float(value)
 
         return np.array([out[c] for c in self.feature_columns], dtype=np.float32)

@@ -52,6 +52,13 @@ class AutoencoderDetector(AnomalyDetector):
         self._input_dim: int | None = None
 
     def fit(self, x: np.ndarray) -> AutoencoderDetector:
+        # Pin the global random seed so two runs on the same data produce
+        # reproducible weights, scores, and tuned thresholds. Without this the
+        # reported metrics drift by ±0.02 F1 between runs.
+        from tensorflow import keras
+
+        keras.utils.set_random_seed(42)
+
         x_scaled = self.scaler.fit_transform(x)
         self._input_dim = x_scaled.shape[1]
         self.model = _build_keras_model(self._input_dim, self.hidden_layers, self.learning_rate)

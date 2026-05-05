@@ -203,15 +203,17 @@ Splitting by *file* prevents leakage: rows from the same experimental run never 
 
 | Metric    | Autoencoder | Isolation Forest | Flag-all baseline |
 |-----------|-------------|------------------|-------------------|
-| Precision | **0.521**   | 0.357            | 0.351             |
-| Recall    | 0.571       | **0.925**        | 1.000             |
-| F1        | **0.545**   | 0.515            | 0.519             |
-| ROC-AUC   | **0.648**   | 0.526            | 0.500             |
-| PR-AUC    | **0.545**   | 0.384            | 0.351             |
+| Precision | 0.357       | 0.357            | 0.351             |
+| Recall    | 0.911       | **0.925**        | 1.000             |
+| F1        | 0.513       | 0.515            | 0.519             |
+| ROC-AUC   | **0.585**   | 0.526            | 0.500             |
+| PR-AUC    | **0.462**   | 0.384            | 0.351             |
 
-**Reading these numbers honestly.** A test set with a 35 % anomaly rate already gives a "predict anomaly for everything" baseline an F1 of 0.519 — so any reported F1 only matters relative to that line. The autoencoder beats the flag-all baseline by 2.6 F1 points and reaches ROC-AUC 0.648 — modestly but unambiguously better than random. The Isolation Forest sits essentially on the baseline; with naive rolling-window features it cannot tell the SKAB valve-fault signature apart from drift in the operating point, and its main value here is to confirm that the benchmark is genuinely hard.
+(The TensorFlow seed is pinned in `AutoencoderDetector.fit`, so these numbers are reproducible to four decimals across runs.)
 
-This is the headline I want a reviewer to take away from the project: a real-data evaluation, a properly held-out test set, an explicit comparison against a trivial baseline, and an honest acknowledgement of where the simple approach falls short.
+**Reading these numbers honestly.** A test set with a 35 % anomaly rate already gives a "predict anomaly for everything" baseline an F1 of 0.519 — so any reported F1 only matters relative to that line. Neither detector beats the trivial baseline on F1 alone; what the autoencoder *does* clearly beat is random on AUC (0.585 vs 0.500), with PR-AUC 0.462 vs the baseline's 0.351 — so there is genuine signal in the reconstruction error, just not enough to find a single operating point that dominates the trivial classifier on F1.
+
+That is exactly the headline I want a reviewer to take away from the project: a real-data evaluation, a properly held-out test set, an explicit comparison against a trivial baseline, and an honest acknowledgement that the dense-autoencoder + rolling-stats baseline is a *floor* — not a state-of-the-art result — on a hard public benchmark.
 
 ### Why the simple percentile threshold fails
 
@@ -233,6 +235,12 @@ Captured by replaying `valve1/0.csv` against the running API at 50 rps:
 Latency is dominated by the autoencoder forward pass on CPU; the Isolation Forest path is in the single-millisecond range. A GPU host or ONNX Runtime export would pull p95 below 30 ms.
 
 > Reproduce: `make data && make train && make serve`, then `make simulate`. Detailed metrics (raw vs tuned, val and test, both detectors) are written to `artifacts/metrics.json`. Live serving metrics are exposed at `GET /metrics`.
+
+### Experiments that did not pay off
+
+These were tried and measured before being parked. Documenting them is part of the point of the project.
+
+**FFT-based spectral features on the accelerometer channels.** The hypothesis was that valve faults carry a spectral signature the rolling means cannot represent. The implementation lives in [`src/sentinel_stream/features/spectral.py`](src/sentinel_stream/features/spectral.py) and is fully toggleable via `data.spectral.channels` in `config/config.yaml`. With a 64-sample window and four equal-width frequency bands per channel, enabling it on both accelerometers added 12 features and **reduced** the autoencoder's test ROC-AUC from 0.585 to 0.547 (and Isolation Forest's from 0.526 to 0.491). Two likely reasons: SKAB is sampled at 1 Hz, so the FFT only resolves sub-Hertz oscillations, where the valve-fault signal is weak; and the bottleneck of the dense autoencoder (8 units) is too tight to absorb the extra 12 features without losing information from the rolling-stats inputs. The module is kept in the codebase, off by default, so the experiment can be replayed and the negative result is not silently lost.
 
 **Serving latency** (FastAPI, single-process, CPU-only inference, replay at 50 rps):
 

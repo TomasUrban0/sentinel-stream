@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from .spectral import DEFAULT_BANDS, DEFAULT_WINDOW, spectral_columns
+
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
 
@@ -26,6 +28,8 @@ BASE_FEATURES = (
     "voltage",
     "volume_flow_rate",
 )
+
+DEFAULT_SPECTRAL_CHANNELS = ("accelerometer_1_rms", "accelerometer_2_rms")
 
 
 def get_or_create_spark(app_name: str = "sentinel-stream") -> SparkSession:
@@ -47,9 +51,7 @@ def build_features(
 ) -> DataFrame:
     """Add rolling, lag, and time-based features to a Spark DataFrame.
 
-    The DataFrame must contain a ``timestamp`` column and the columns named in
-    ``base_features``. Rows at the head of the series with insufficient history
-    are dropped, since their rolling features are not well defined.
+    Spectral columns, if present in the input DataFrame, pass through unchanged.
     """
     from pyspark.sql import functions as F
     from pyspark.sql.window import Window
@@ -81,6 +83,8 @@ def feature_columns(
     base_features: Iterable[str] = BASE_FEATURES,
     rolling_windows: Iterable[int] = (5, 30),
     lag_steps: Iterable[int] = (1, 5),
+    spectral_channels: Iterable[str] = DEFAULT_SPECTRAL_CHANNELS,
+    spectral_bands: int = DEFAULT_BANDS,
 ) -> list[str]:
     """Return the deterministic ordered list of feature columns produced above."""
     cols: list[str] = []
@@ -90,4 +94,16 @@ def feature_columns(
         for lag in lag_steps:
             cols.append(f"{col}_lag_{lag}")
     cols.extend(["hour", "dayofweek"])
+    cols.extend(spectral_columns(spectral_channels, n_bands=spectral_bands))
     return cols
+
+
+__all__ = [
+    "BASE_FEATURES",
+    "DEFAULT_BANDS",
+    "DEFAULT_SPECTRAL_CHANNELS",
+    "DEFAULT_WINDOW",
+    "build_features",
+    "feature_columns",
+    "get_or_create_spark",
+]

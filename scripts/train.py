@@ -24,6 +24,7 @@ from sentinel_stream.features.engineering import (
     feature_columns,
     get_or_create_spark,
 )
+from sentinel_stream.features.spectral import add_spectral_columns
 from sentinel_stream.models.autoencoder import AutoencoderDetector
 from sentinel_stream.models.base import AnomalyDetector
 from sentinel_stream.models.evaluation import best_f1_threshold, evaluate
@@ -57,9 +58,19 @@ def _spark_features(
     base_features: tuple[str, ...],
     rolling_windows: tuple[int, ...],
     lag_steps: tuple[int, ...],
+    spectral_channels: tuple[str, ...],
+    spectral_window: int,
+    spectral_bands: int,
     work_dir: Path,
     name: str,
 ) -> pd.DataFrame:
+    # Spectral columns are computed in pandas first because rFFT inside a
+    # Spark window is awkward to express; once they are columns on the
+    # DataFrame, Spark passes them through unchanged.
+    pdf = add_spectral_columns(
+        pdf, channels=spectral_channels, window=spectral_window, n_bands=spectral_bands
+    )
+
     work_dir.mkdir(parents=True, exist_ok=True)
     csv_path = work_dir / f"{name}.csv"
     pdf.to_csv(csv_path, index=False)
@@ -115,6 +126,10 @@ def main() -> None:
     base_features = tuple(config["data"]["features"])
     rolling_windows = tuple(config["data"]["rolling_windows"])
     lag_steps = tuple(config["data"]["lag_steps"])
+    spectral_cfg = config["data"].get("spectral", {})
+    spectral_channels = tuple(spectral_cfg.get("channels", []))
+    spectral_window = int(spectral_cfg.get("window", 64))
+    spectral_bands = int(spectral_cfg.get("bands", 4))
 
     logger.info("Loading SKAB from %s", args.data_root)
     normal_df = load_normal(args.data_root)
@@ -130,16 +145,22 @@ def main() -> None:
     )
 
     work_dir = args.out / "_spark_inputs"
-    logger.info("Building features with PySpark")
-    train_pdf = _spark_features(
-        normal_df, base_features, rolling_windows, lag_steps, work_dir, "train"
-    )
-    val_pdf = _spark_features(val_df, base_features, rolling_windows, lag_steps, work_dir, "val")
-    test_pdf = _spark_features(
-        test_df, base_features, rolling_windows, lag_steps, work_dir, "test"
-    )
+    logger.info("Building features with PySpark + FFT")
+    feat_kwargs = {
+        "base_features": base_features,
+        "rolling_windows": rolling_windows,
+        "lag_steps": lag_steps,
+        "spectral_channels": spectral_channels,
+        "spectral_window": spectral_window,
+        "spectral_bands": spectral_bands,
+    }
+    train_pdf = _spark_features(normal_df, **feat_kwargs, work_dir=work_dir, name="train")
+    val_pdf = _spark_features(val_df, **feat_kwargs, work_dir=work_dir, name="val")
+    test_pdf = _spark_features(test_df, **feat_kwargs, work_dir=work_dir, name="test")
 
-    cols = feature_columns(base_features, rolling_windows, lag_steps)
+    cols = feature_columns(
+        base_features, rolling_windows, lag_steps, spectral_channels, spectral_bands
+    )
     x_train = _to_numpy(train_pdf, cols)
     x_val = _to_numpy(val_pdf, cols)
     x_test = _to_numpy(test_pdf, cols)
