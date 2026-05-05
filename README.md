@@ -1,5 +1,10 @@
 # Sentinel Stream
 
+[![CI](https://github.com/TomasUrban0/sentinel-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/TomasUrban0/sentinel-stream/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](#license)
+
 **Real-time anomaly detection for multivariate time-series data.**
 
 Sentinel Stream is an end-to-end machine learning system that ingests time-series sensor data, engineers features at scale with PySpark, trains an unsupervised autoencoder for anomaly detection, and serves predictions in real time through a FastAPI service. It includes drift monitoring, containerized deployment, and a CI pipeline.
@@ -14,7 +19,7 @@ Most anomaly detection demos stop at `model.fit()`. Real systems have to:
 
 - Ingest data continuously, not from a CSV
 - Engineer features deterministically across training and inference
-- Serve predictions with sub-100ms latency
+- Serve predictions with low, predictable latency
 - Detect when the data distribution drifts away from training
 - Be reproducible, tested, and containerized
 
@@ -75,8 +80,11 @@ sentinel-stream/
 │   ├── generate_data.py    # build a synthetic dataset with injected anomalies
 │   ├── train.py            # train and persist models
 │   └── simulate_stream.py  # send live records to the API
-├── tests/             # unit + integration tests
+├── notebooks/
+│   └── exploration.ipynb  # EDA + anomaly visualisations
+├── tests/             # unit + integration + end-to-end tests
 ├── config/config.yaml
+├── Makefile
 ├── Dockerfile
 ├── docker-compose.yml
 └── .github/workflows/ci.yml
@@ -85,6 +93,18 @@ sentinel-stream/
 ---
 
 ## Quick start
+
+The fastest path is via the `Makefile`:
+
+```bash
+make setup     # install dependencies
+make data      # generate synthetic dataset
+make train     # train both models, write artifacts/
+make serve     # start the FastAPI service on :8000
+make simulate  # send a 60-second synthetic stream to the running API
+```
+
+Below is the same flow without Make.
 
 ### 1. Install
 
@@ -151,6 +171,34 @@ docker-compose up --build
 ```
 
 The API is then available at `http://localhost:8000`. Swagger docs at `http://localhost:8000/docs`.
+
+---
+
+## Results
+
+Trained on a synthetic dataset of **50,000 sensor readings** with a **2% injected anomaly rate** (mix of spikes, drift segments, and correlated multi-sensor faults). Models are trained on the normal partition only and evaluated on a held-out time window with ground-truth labels.
+
+| Metric    | Autoencoder | Isolation Forest |
+|-----------|-------------|------------------|
+| Precision | **0.972**   | 0.606            |
+| Recall    | **0.944**   | 0.975            |
+| F1        | **0.957**   | 0.748            |
+| ROC-AUC   | **0.990**   | 0.946            |
+| PR-AUC    | **0.986**   | 0.822            |
+
+The autoencoder dominates on precision and F1; the Isolation Forest baseline matches it on recall but produces many more false positives because it operates on a fixed contamination quantile.
+
+**Serving latency** (FastAPI, single-process, CPU-only inference on a local machine):
+
+| Percentile | Latency |
+|------------|---------|
+| p50        | 129 ms  |
+| p95        | 203 ms  |
+| p99        | 298 ms  |
+
+Latency is dominated by the autoencoder forward pass; the Isolation Forest path is in the single-millisecond range. Running the API on a GPU host or switching to ONNX Runtime would push p95 below 50 ms.
+
+> Reproduce: `make data && make train && make serve`, then `make simulate`. Final metrics are written to `artifacts/metrics.json` and exposed live at `GET /metrics`.
 
 ---
 

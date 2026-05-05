@@ -43,6 +43,8 @@ derby.log
 .env
 .env.local
 
-# Claude
+# Local tooling
 .claude/
 CLAUDE.md
+.cursor/
+.aider*
