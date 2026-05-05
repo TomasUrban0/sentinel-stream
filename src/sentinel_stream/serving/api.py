@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
 
     app.state.config = config
     app.state.transformer = StreamingFeatureTransformer(
+        base_features=tuple(config["data"]["features"]),
         rolling_windows=tuple(config["data"]["rolling_windows"]),
         lag_steps=tuple(config["data"]["lag_steps"]),
     )

@@ -5,11 +5,11 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 
-**Real-time anomaly detection for multivariate time-series data.**
+**Real-time anomaly detection for multivariate industrial time-series, evaluated on the [Skoltech Anomaly Benchmark (SKAB)](https://www.kaggle.com/datasets/yuriykatser/skoltech-anomaly-benchmark-skab).**
 
-Sentinel Stream is an end-to-end machine learning system that ingests time-series sensor data, engineers features at scale with PySpark, trains an unsupervised autoencoder for anomaly detection, and serves predictions in real time through a FastAPI service. It includes drift monitoring, containerized deployment, and a CI pipeline.
+Sentinel Stream is an end-to-end machine learning system that ingests eight-channel sensor telemetry, engineers features at scale with PySpark, trains an unsupervised autoencoder for anomaly detection, and serves predictions in real time through a FastAPI service. It includes drift monitoring, containerized deployment, and a CI pipeline.
 
-The project is designed to mirror the engineering practices required to take a model from a Jupyter notebook to a production service: a problem most "ML portfolio" projects skip.
+The project mirrors the engineering practices required to take a model from a Jupyter notebook to a production service: a problem most "ML portfolio" projects skip.
 
 ---
 
@@ -23,7 +23,20 @@ Most anomaly detection demos stop at `model.fit()`. Real systems have to:
 - Detect when the data distribution drifts away from training
 - Be reproducible, tested, and containerized
 
-Sentinel Stream addresses each of these in a single, coherent codebase.
+Sentinel Stream addresses each of these in a single, coherent codebase, and validates the modeling on a published industrial benchmark rather than synthetic data.
+
+---
+
+## Dataset
+
+[**SKAB — Skoltech Anomaly Benchmark**](https://www.kaggle.com/datasets/yuriykatser/skoltech-anomaly-benchmark-skab) is a multivariate time-series benchmark released by Skoltech. The data come from a water-circulation testbed instrumented with eight sensors, sampled at 1 Hz, with deliberately induced faults (valve closures, pump cavitation, etc.) labeled per-row.
+
+| Partition       | Rows    | Use                                              |
+|-----------------|---------|--------------------------------------------------|
+| `anomaly-free/` | 9,401   | Training (no labels — assumed all normal)        |
+| `valve1`/`valve2`/`other` | 37,459 (35 % anomalous) | Held-out evaluation with ground-truth labels |
+
+Eight sensor channels: two RMS accelerometers, current, pressure, temperature, thermocouple, voltage, and volumetric flow rate.
 
 ---
 
@@ -31,9 +44,9 @@ Sentinel Stream addresses each of these in a single, coherent codebase.
 
 ```
 +----------------+      +------------------+      +-----------------+
-|  Data source   | ---> |  Feature         | ---> |  Model trainer  |
-|  (synthetic /  |      |  engineering     |      |  (Autoencoder + |
-|   IoT stream)  |      |  (PySpark)       |      |   IsolationFst) |
+|  SKAB CSV      | ---> |  Feature         | ---> |  Model trainer  |
+|  (8 sensors)   |      |  engineering     |      |  (Autoencoder + |
+|                |      |  (PySpark)       |      |   IsolationFst) |
 +----------------+      +------------------+      +-----------------+
                                                           |
                                                           v
@@ -70,18 +83,18 @@ Sentinel Stream addresses each of these in a single, coherent codebase.
 ```
 sentinel-stream/
 ├── src/sentinel_stream/
-│   ├── data/          # synthetic data generator + ingestion helpers
-│   ├── features/      # PySpark feature engineering + sklearn-compatible transformer
+│   ├── data/          # SKAB loader
+│   ├── features/      # PySpark feature engineering + streaming transformer
 │   ├── models/        # Autoencoder (Keras) and Isolation Forest baseline
 │   ├── serving/       # FastAPI app, request/response schemas
 │   ├── monitoring/    # Drift detection (Kolmogorov-Smirnov)
 │   └── utils/         # Logging, config loading
 ├── scripts/
-│   ├── generate_data.py    # build a synthetic dataset with injected anomalies
-│   ├── train.py            # train and persist models
-│   └── simulate_stream.py  # send live records to the API
+│   ├── download_data.py   # fetch SKAB from Kaggle
+│   ├── train.py           # train and persist models
+│   └── simulate_stream.py # replay a SKAB CSV against the running API
 ├── notebooks/
-│   └── exploration.ipynb  # EDA + anomaly visualisations
+│   └── exploration.ipynb  # EDA + anomaly visualisations on SKAB
 ├── tests/             # unit + integration + end-to-end tests
 ├── config/config.yaml
 ├── Makefile
@@ -94,14 +107,14 @@ sentinel-stream/
 
 ## Quick start
 
-The fastest path is via the `Makefile`:
+You will need a [Kaggle API token](https://www.kaggle.com/settings) at `~/.kaggle/kaggle.json` for the data download step.
 
 ```bash
-make setup     # install dependencies
-make data      # generate synthetic dataset
+make setup     # install dependencies in editable mode
+make data      # download SKAB into data/skab/
 make train     # train both models, write artifacts/
 make serve     # start the FastAPI service on :8000
-make simulate  # send a 60-second synthetic stream to the running API
+make simulate  # replay a labeled SKAB CSV against the running API
 ```
 
 Below is the same flow without Make.
@@ -115,19 +128,19 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-### 2. Generate a dataset
+### 2. Download SKAB
 
 ```bash
-python scripts/generate_data.py --rows 50000 --anomaly-rate 0.02 --out data/sensors.csv
+python scripts/download_data.py --out data/skab
 ```
 
 ### 3. Train the models
 
 ```bash
-python scripts/train.py --data data/sensors.csv --out artifacts/
+python scripts/train.py --data-root data/skab --out artifacts/
 ```
 
-This trains both an autoencoder and an Isolation Forest baseline, evaluates them on a held-out window, and writes the artifacts to `artifacts/`.
+Trains an autoencoder (and an Isolation Forest baseline) on the anomaly-free partition only, evaluates against the labeled partition, and writes the artifacts and `metrics.json` to `artifacts/`.
 
 ### 4. Serve predictions
 
@@ -140,27 +153,25 @@ Then send a record:
 ```bash
 curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
-  -d '{"temperature": 72.4, "pressure": 101.3, "vibration": 0.12, "humidity": 45.1}'
+  -d '{
+    "accelerometer_1_rms": 0.027,
+    "accelerometer_2_rms": 0.040,
+    "current": 0.71,
+    "pressure": 0.058,
+    "temperature": 70.6,
+    "thermocouple": 24.4,
+    "voltage": 220.5,
+    "volume_flow_rate": 32.1
+  }'
 ```
 
-Response:
-
-```json
-{
-  "anomaly_score": 0.0184,
-  "is_anomaly": false,
-  "threshold": 0.0421,
-  "model": "autoencoder"
-}
-```
-
-### 5. Simulate a live stream
+### 5. Replay a live stream
 
 ```bash
-python scripts/simulate_stream.py --rate 10 --duration 60
+python scripts/simulate_stream.py --rate 20
 ```
 
-Sends 10 records per second for 60 seconds, with sporadic anomalies injected.
+Reads `data/skab/SKAB/valve1/0.csv` row-by-row and sends each record to `/predict`. Logs recall against the ground-truth label.
 
 ---
 
@@ -176,29 +187,30 @@ The API is then available at `http://localhost:8000`. Swagger docs at `http://lo
 
 ## Results
 
-Trained on a synthetic dataset of **50,000 sensor readings** with a **2% injected anomaly rate** (mix of spikes, drift segments, and correlated multi-sensor faults). Models are trained on the normal partition only and evaluated on a held-out time window with ground-truth labels.
+Trained unsupervised on 9,396 anomaly-free rows (the `anomaly-free/` partition of SKAB), evaluated on 37,454 labeled rows from `valve1/`, `valve2/`, and `other/`. The threshold is set at the 99th percentile of training-set reconstruction errors. **No labels are seen during training.**
 
 | Metric    | Autoencoder | Isolation Forest |
 |-----------|-------------|------------------|
-| Precision | **0.972**   | 0.606            |
-| Recall    | **0.944**   | 0.975            |
-| F1        | **0.957**   | 0.748            |
-| ROC-AUC   | **0.990**   | 0.946            |
-| PR-AUC    | **0.986**   | 0.822            |
+| Precision | 0.360       | 0.358            |
+| Recall    | **0.948**   | **0.954**        |
+| F1        | **0.522**   | 0.520            |
+| ROC-AUC   | **0.573**   | 0.525            |
+| PR-AUC    | **0.447**   | 0.393            |
 
-The autoencoder dominates on precision and F1; the Isolation Forest baseline matches it on recall but produces many more false positives because it operates on a fixed contamination quantile.
+These numbers sit in the range published academic baselines report for SKAB without supervised threshold tuning. The autoencoder edges out Isolation Forest on AUC; both lean toward high recall and modest precision because the labeled partition is taken from a *different physical regime* than the training partition (valve-fault scenarios vs. baseline operation), so the simple percentile threshold over-flags. Two practical takeaways are baked into the project:
 
-**Serving latency** (FastAPI, single-process, CPU-only inference on a local machine):
+1. **The drift monitor catches this.** During the replay, 68 of 82 engineered features cross the KS drift threshold against the training reference — the system itself surfaces the distribution shift behind the precision drop.
+2. **The threshold is a knob, not a rule.** A small labeled validation slice (or a quantile fit during canary deployment) is the standard fix and is what would land next on a production roadmap.
+
+**Serving latency** (FastAPI, single-process, CPU-only inference, replay at 50 rps):
 
 | Percentile | Latency |
 |------------|---------|
-| p50        | 129 ms  |
-| p95        | 203 ms  |
-| p99        | 298 ms  |
+| p50        | 51 ms   |
+| p95        | 75 ms   |
+| p99        | 113 ms  |
 
-Latency is dominated by the autoencoder forward pass; the Isolation Forest path is in the single-millisecond range. Running the API on a GPU host or switching to ONNX Runtime would push p95 below 50 ms.
-
-> Reproduce: `make data && make train && make serve`, then `make simulate`. Final metrics are written to `artifacts/metrics.json` and exposed live at `GET /metrics`.
+> Reproduce: `make data && make train && make serve`, then `make simulate`. Final training metrics are in `artifacts/metrics.json` and live serving metrics at `GET /metrics`.
 
 ---
 
@@ -223,7 +235,7 @@ Features are engineered in PySpark to demonstrate the same pattern that scales t
 - **Time features**: hour-of-day, day-of-week
 - **Z-score normalization** with parameters persisted for inference
 
-The same transformations are wrapped in a sklearn-compatible class for single-record inference, so training and serving stay in lockstep.
+The same transformations are wrapped in a streaming-compatible class for single-record inference, so training and serving stay in lockstep — there is no risk of train/serve skew silently degrading the model.
 
 ---
 
@@ -235,7 +247,7 @@ The `/metrics` endpoint exposes:
 - p50 / p95 / p99 inference latency
 - Per-feature Kolmogorov-Smirnov statistic vs. the training distribution
 
-A drift alert is logged when the KS statistic exceeds a configurable threshold for any feature, indicating that the live data has shifted away from what the model saw at training time.
+A drift alert is logged when the KS statistic exceeds a configurable threshold for any feature, indicating that the live data has shifted away from what the model saw at training time. On SKAB this fires on the majority of features once the valve-fault data starts streaming — a useful, honest signal that re-training (or threshold re-tuning) is needed.
 
 ---
 
@@ -252,10 +264,11 @@ The CI pipeline (`.github/workflows/ci.yml`) runs linting and the test suite on 
 
 ## Roadmap
 
-- [ ] Replace the simulated stream with a Kafka producer/consumer
+- [ ] LSTM/Transformer autoencoder to model temporal dependencies explicitly
+- [ ] Threshold re-tuning on a small labeled validation slice
+- [ ] Replace HTTP polling with a Kafka producer/consumer
 - [ ] Persist predictions to a time-series database (TimescaleDB)
-- [ ] Replace dense autoencoder with an LSTM autoencoder for sequential signals
-- [ ] Add MLflow experiment tracking
+- [ ] MLflow experiment tracking and a model registry
 - [ ] Deploy the API to Azure Container Apps via GitHub Actions
 
 ---

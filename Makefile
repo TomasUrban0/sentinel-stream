@@ -3,10 +3,10 @@
 help:
 	@echo "Available targets:"
 	@echo "  setup     Install dependencies in editable mode"
-	@echo "  data      Generate synthetic dataset (50k rows, 2% anomalies)"
-	@echo "  train     Train autoencoder + isolation forest on data/sensors.csv"
+	@echo "  data      Download the SKAB dataset from Kaggle into data/skab"
+	@echo "  train     Train autoencoder + isolation forest on SKAB"
 	@echo "  serve     Run the FastAPI inference service on :8000"
-	@echo "  simulate  Send a 60s synthetic stream to the running API"
+	@echo "  simulate  Replay a SKAB CSV against the running API"
 	@echo "  test      Run the test suite with coverage"
 	@echo "  lint      Run Ruff lint checks"
 	@echo "  format    Auto-fix formatting and lint issues with Ruff"
@@ -18,16 +18,16 @@ setup:
 	pip install -e .
 
 data:
-	python scripts/generate_data.py --rows 50000 --anomaly-rate 0.02 --out data/sensors.csv
+	python scripts/download_data.py --out data/skab
 
 train:
-	python scripts/train.py --data data/sensors.csv --out artifacts/
+	python scripts/train.py --data-root data/skab --out artifacts/
 
 serve:
 	uvicorn sentinel_stream.serving.api:app --host 0.0.0.0 --port 8000
 
 simulate:
-	python scripts/simulate_stream.py --rate 10 --duration 60
+	python scripts/simulate_stream.py --rate 20
 
 test:
 	pytest -v --cov=sentinel_stream --cov-report=term-missing

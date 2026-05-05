@@ -6,6 +6,19 @@ from fastapi.testclient import TestClient
 from sentinel_stream.serving.api import app
 
 
+def _payload(value: float = 1.0) -> dict[str, float]:
+    return {
+        "accelerometer_1_rms": value,
+        "accelerometer_2_rms": value,
+        "current": value,
+        "pressure": value,
+        "temperature": value,
+        "thermocouple": value,
+        "voltage": value,
+        "volume_flow_rate": value,
+    }
+
+
 def test_health_endpoint():
     with TestClient(app) as client:
         r = client.get("/health")
@@ -14,11 +27,7 @@ def test_health_endpoint():
 
 
 def test_predict_returns_503_without_model(monkeypatch, tmp_path):
-    # Force the lifespan to look at an empty artifacts dir.
     monkeypatch.setenv("SENTINEL_ARTIFACTS_DIR", str(tmp_path / "missing"))
     with TestClient(app) as client:
-        r = client.post(
-            "/predict",
-            json={"temperature": 70.0, "pressure": 101.0, "vibration": 0.1, "humidity": 45.0},
-        )
+        r = client.post("/predict", json=_payload())
         assert r.status_code == 503

@@ -1,4 +1,9 @@
-"""Train both detectors on a generated dataset and persist artifacts."""
+"""Train both detectors on SKAB and persist artifacts.
+
+Training is unsupervised: only the anomaly-free partition is fed to the
+detectors. Evaluation uses the labeled partition (valve1 + valve2 + other),
+so the test labels are real industrial faults, not synthetic injections.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from sentinel_stream.data.skab_loader import load_labeled, load_normal
 from sentinel_stream.features.engineering import (
     build_features,
     feature_columns,
@@ -27,9 +33,36 @@ def _to_numpy(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
     return df[cols].to_numpy(dtype=np.float32)
 
 
+def _spark_features(
+    pdf: pd.DataFrame,
+    base_features: tuple[str, ...],
+    rolling_windows: tuple[int, ...],
+    lag_steps: tuple[int, ...],
+    work_dir: Path,
+    name: str,
+) -> pd.DataFrame:
+    # Spark on Windows can't reliably ingest a pandas DataFrame via
+    # createDataFrame (Python worker socket timeouts), so we round-trip
+    # through a CSV — Spark's native CSV reader is rock solid.
+    work_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = work_dir / f"{name}.csv"
+    pdf.to_csv(csv_path, index=False)
+    spark = get_or_create_spark()
+    sdf = spark.read.option("header", True).option("inferSchema", True).csv(str(csv_path))
+    sdf = build_features(
+        sdf,
+        base_features=base_features,
+        rolling_windows=rolling_windows,
+        lag_steps=lag_steps,
+    )
+    out = sdf.toPandas()
+    spark.stop()
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, required=True)
+    parser.add_argument("--data-root", type=Path, default=Path("data/skab"))
     parser.add_argument("--out", type=Path, default=Path("artifacts"))
     parser.add_argument("--config", type=Path, default=None)
     args = parser.parse_args()
@@ -37,32 +70,33 @@ def main() -> None:
     config = load_config(args.config)
     args.out.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Building features with PySpark from %s", args.data)
-    spark = get_or_create_spark()
-    sdf = spark.read.option("header", True).option("inferSchema", True).csv(str(args.data))
-    sdf = build_features(
-        sdf,
-        rolling_windows=tuple(config["data"]["rolling_windows"]),
-        lag_steps=tuple(config["data"]["lag_steps"]),
-    )
-    pdf = sdf.toPandas()
-    spark.stop()
+    base_features = tuple(config["data"]["features"])
+    rolling_windows = tuple(config["data"]["rolling_windows"])
+    lag_steps = tuple(config["data"]["lag_steps"])
 
-    cols = feature_columns(
-        rolling_windows=tuple(config["data"]["rolling_windows"]),
-        lag_steps=tuple(config["data"]["lag_steps"]),
+    logger.info("Loading SKAB from %s", args.data_root)
+    normal_df = load_normal(args.data_root)
+    labeled_df = load_labeled(args.data_root)
+    logger.info(
+        "Loaded %d normal rows and %d labeled rows (%.2f%% anomalies)",
+        len(normal_df),
+        len(labeled_df),
+        100 * labeled_df["is_anomaly"].mean(),
     )
 
-    # Time-based 80/20 split: train on the first chunk only on "normal" rows,
-    # evaluate on the held-out chunk against true labels.
-    split = int(len(pdf) * 0.8)
-    train_df = pdf.iloc[:split]
-    eval_df = pdf.iloc[split:]
+    logger.info("Building features with PySpark")
+    work_dir = args.out / "_spark_inputs"
+    train_pdf = _spark_features(
+        normal_df, base_features, rolling_windows, lag_steps, work_dir, "train"
+    )
+    eval_pdf = _spark_features(
+        labeled_df, base_features, rolling_windows, lag_steps, work_dir, "eval"
+    )
 
-    train_normal = train_df[train_df["is_anomaly"] == 0]
-    x_train = _to_numpy(train_normal, cols)
-    x_eval = _to_numpy(eval_df, cols)
-    y_eval = eval_df["is_anomaly"].to_numpy()
+    cols = feature_columns(base_features, rolling_windows, lag_steps)
+    x_train = _to_numpy(train_pdf, cols)
+    x_eval = _to_numpy(eval_pdf, cols)
+    y_eval = eval_pdf["is_anomaly"].to_numpy()
 
     logger.info("Training autoencoder on %d normal rows, %d features", *x_train.shape)
     ae = AutoencoderDetector(**config["model"]["autoencoder"]).fit(x_train)
@@ -73,6 +107,10 @@ def main() -> None:
     iforest.save(str(args.out))
 
     metrics = {
+        "dataset": "SKAB",
+        "n_train_normal_rows": int(len(x_train)),
+        "n_eval_rows": int(len(x_eval)),
+        "eval_anomaly_rate": float(y_eval.mean()),
         "autoencoder": evaluate(ae.score(x_eval), y_eval, ae.threshold),
         "isolation_forest": evaluate(iforest.score(x_eval), y_eval, iforest.threshold),
     }
@@ -80,7 +118,6 @@ def main() -> None:
         json.dump(metrics, f, indent=2)
     logger.info("Evaluation: %s", json.dumps(metrics, indent=2))
 
-    # Persist a reference sample for drift monitoring.
     ref_sample_size = min(config["monitoring"]["reference_sample_size"], len(x_train))
     rng = np.random.default_rng(0)
     idx = rng.choice(len(x_train), size=ref_sample_size, replace=False)

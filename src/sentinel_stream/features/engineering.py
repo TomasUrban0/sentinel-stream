@@ -16,7 +16,16 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
 
 
-BASE_FEATURES = ("temperature", "pressure", "vibration", "humidity")
+BASE_FEATURES = (
+    "accelerometer_1_rms",
+    "accelerometer_2_rms",
+    "current",
+    "pressure",
+    "temperature",
+    "thermocouple",
+    "voltage",
+    "volume_flow_rate",
+)
 
 
 def get_or_create_spark(app_name: str = "sentinel-stream") -> SparkSession:
