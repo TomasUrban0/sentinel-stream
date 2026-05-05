@@ -1,0 +1,14 @@
+services:
+  api:
+    build: .
+    image: sentinel-stream:latest
+    container_name: sentinel-stream-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+      - ./config:/app/config:ro
+    environment:
+      - SENTINEL_ARTIFACTS_DIR=/app/artifacts
+      - SENTINEL_CONFIG_PATH=/app/config/config.yaml
+    restart: unless-stopped
