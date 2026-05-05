@@ -1,0 +1,24 @@
+data:
+  features: [temperature, pressure, vibration, humidity]
+  rolling_windows: [5, 30]
+  lag_steps: [1, 5]
+
+model:
+  autoencoder:
+    hidden_layers: [16, 8, 4, 8, 16]
+    epochs: 30
+    batch_size: 256
+    learning_rate: 0.001
+    threshold_percentile: 99
+  isolation_forest:
+    n_estimators: 200
+    contamination: 0.02
+
+monitoring:
+  drift_threshold: 0.15
+  reference_sample_size: 5000
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  default_model: autoencoder
