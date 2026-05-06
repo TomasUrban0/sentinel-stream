@@ -1,10 +1,11 @@
-.PHONY: help setup data train serve simulate test lint format docker clean
+.PHONY: help setup data train cv plots serve simulate test lint format docker clean
 
 help:
 	@echo "Available targets:"
 	@echo "  setup     Install dependencies in editable mode"
 	@echo "  data      Download the AI4I 2020 dataset from Kaggle"
 	@echo "  train     Train XGBoost + Keras classifiers on AI4I"
+	@echo "  cv        5-fold stratified cross-validation for XGBoost"
 	@echo "  plots     Render evaluation plots into docs/img/"
 	@echo "  serve     Run the FastAPI inference service on :8000"
 	@echo "  simulate  Replay AI4I rows against the running API"
@@ -23,6 +24,9 @@ data:
 
 train:
 	python scripts/train.py --data-root data/ai4i --out artifacts/
+
+cv:
+	python scripts/cross_validate.py --data-root data/ai4i --out artifacts/cv_results.json
 
 plots:
 	python scripts/generate_plots.py --data-root data/ai4i --artifacts artifacts/ --out docs/img/
