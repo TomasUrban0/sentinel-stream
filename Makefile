@@ -3,10 +3,11 @@
 help:
 	@echo "Available targets:"
 	@echo "  setup     Install dependencies in editable mode"
-	@echo "  data      Download the SKAB dataset from Kaggle into data/skab"
-	@echo "  train     Train autoencoder + isolation forest on SKAB"
+	@echo "  data      Download the AI4I 2020 dataset from Kaggle"
+	@echo "  train     Train XGBoost + Keras classifiers on AI4I"
+	@echo "  plots     Render evaluation plots into docs/img/"
 	@echo "  serve     Run the FastAPI inference service on :8000"
-	@echo "  simulate  Replay a SKAB CSV against the running API"
+	@echo "  simulate  Replay AI4I rows against the running API"
 	@echo "  test      Run the test suite with coverage"
 	@echo "  lint      Run Ruff lint checks"
 	@echo "  format    Auto-fix formatting and lint issues with Ruff"
@@ -18,16 +19,19 @@ setup:
 	pip install -e .
 
 data:
-	python scripts/download_data.py --out data/skab
+	python scripts/download_data.py --out data/ai4i
 
 train:
-	python scripts/train.py --data-root data/skab --out artifacts/
+	python scripts/train.py --data-root data/ai4i --out artifacts/
+
+plots:
+	python scripts/generate_plots.py --data-root data/ai4i --artifacts artifacts/ --out docs/img/
 
 serve:
 	uvicorn sentinel_stream.serving.api:app --host 0.0.0.0 --port 8000
 
 simulate:
-	python scripts/simulate_stream.py --rate 20
+	python scripts/simulate_stream.py --rate 50 --limit 2000
 
 test:
 	pytest -v --cov=sentinel_stream --cov-report=term-missing

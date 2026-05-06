@@ -1,38 +1,35 @@
 data:
   features:
-    - accelerometer_1_rms
-    - accelerometer_2_rms
-    - current
-    - pressure
-    - temperature
-    - thermocouple
-    - voltage
-    - volume_flow_rate
-  rolling_windows: [5, 30]
-  lag_steps: [1, 5]
-  # Optional FFT-based spectral features (disabled by default after empirical
-  # evaluation degraded both detectors on SKAB — see README "Experiments tried").
-  spectral:
-    channels: []
-    window: 64
-    bands: 4
+    - air_temperature_k
+    - process_temperature_k
+    - rotational_speed_rpm
+    - torque_nm
+    - tool_wear_min
+  split:
+    val_fraction: 0.15
+    test_fraction: 0.15
+    seed: 42
 
 model:
-  autoencoder:
-    hidden_layers: [32, 16, 8, 16, 32]
-    epochs: 40
-    batch_size: 256
+  xgboost:
+    n_estimators: 400
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.9
+    colsample_bytree: 0.9
+    min_child_weight: 1
+  keras_dense:
+    hidden_layers: [64, 32]
+    epochs: 60
+    batch_size: 128
     learning_rate: 0.001
-    threshold_percentile: 99
-  isolation_forest:
-    n_estimators: 200
-    contamination: 0.05
+    dropout: 0.2
 
 monitoring:
   drift_threshold: 0.15
-  reference_sample_size: 5000
+  reference_sample_size: 2000
 
 api:
   host: 0.0.0.0
   port: 8000
-  default_model: autoencoder
+  default_model: xgboost

@@ -1,55 +1,48 @@
-"""End-to-end test: synthetic SKAB-shaped data -> streaming features -> detector.
-
-The PySpark batch pipeline is exercised separately by the training script. Here
-we feed the same kind of multivariate signal directly into the streaming
-transformer to keep the test fast (no Spark, no real download), while still
-validating that the feature vector flows through to the detector unchanged.
-"""
-
-from datetime import UTC, datetime, timedelta
+"""End-to-end smoke test: synthetic AI4I-shaped record -> streaming transformer
+-> XGBoost classifier -> probability."""
 
 import numpy as np
 
-from sentinel_stream.features.engineering import BASE_FEATURES
+from sentinel_stream.data.ai4i_loader import BASE_FEATURES
+from sentinel_stream.features.engineering import ALL_FEATURE_COLUMNS
 from sentinel_stream.features.transformer import StreamingFeatureTransformer
-from sentinel_stream.models.isolation_forest import IsolationForestDetector
+from sentinel_stream.models.xgboost_classifier import XGBoostClassifier
 
 
-def test_full_pipeline_flags_injected_anomalies():
-    rng = np.random.default_rng(11)
-    n = 2000
-    base = rng.normal(loc=0.0, scale=0.3, size=(n, len(BASE_FEATURES)))
+def _build_synthetic(n: int = 800, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    rows = []
+    labels = []
+    for _ in range(n):
+        is_failure = rng.random() < 0.15
+        record = {
+            "type": rng.choice(["L", "M", "H"]),
+            "air_temperature_k": rng.normal(298.0, 1.5),
+            "process_temperature_k": rng.normal(308.0, 1.5)
+            + (3.0 if is_failure else 0.0),
+            "rotational_speed_rpm": rng.normal(1500, 100)
+            - (200 if is_failure else 0.0),
+            "torque_nm": rng.normal(40, 6) + (10 if is_failure else 0.0),
+            "tool_wear_min": rng.uniform(0, 250) + (50 if is_failure else 0.0),
+        }
+        rows.append(record)
+        labels.append(int(is_failure))
+    return rows, np.array(labels)
 
-    labels = np.zeros(n, dtype=int)
-    anomaly_idx = rng.choice(n, size=int(n * 0.05), replace=False)
-    base[anomaly_idx] += rng.normal(loc=4.0, scale=0.5, size=base[anomaly_idx].shape)
-    labels[anomaly_idx] = 1
 
-    transformer = StreamingFeatureTransformer(spectral_channels=())
-    base_ts = datetime(2025, 1, 1, tzinfo=UTC)
+def test_full_pipeline_predicts_synthetic_failures():
+    rows, y = _build_synthetic()
+    transformer = StreamingFeatureTransformer()
+    x = np.vstack([transformer.transform(r) for r in rows])
+    assert x.shape == (len(rows), len(ALL_FEATURE_COLUMNS))
 
-    feature_rows: list[np.ndarray] = []
-    label_rows: list[int] = []
-    for i, row in enumerate(base):
-        record = dict(zip(BASE_FEATURES, row.tolist(), strict=True))
-        transformer.push(record, timestamp=base_ts + timedelta(seconds=i))
-        vec = transformer.transform()
-        if vec is not None:
-            feature_rows.append(vec)
-            label_rows.append(int(labels[i]))
+    clf = XGBoostClassifier(n_estimators=80, max_depth=4)
+    clf.fit(x, y, feature_names=transformer.feature_columns)
+    proba = clf.predict_proba(x)
 
-    x = np.vstack(feature_rows)
-    y = np.array(label_rows)
-    assert x.shape[0] > 1500
-    assert x.shape[1] == len(transformer.feature_columns)
-    assert y.sum() > 0
+    assert proba[y == 1].mean() > proba[y == 0].mean() + 0.2
 
-    detector = IsolationForestDetector(n_estimators=80, contamination=0.05, random_state=0)
-    detector.fit(x[y == 0])
-
-    scores = detector.score(x)
-    assert scores[y == 1].mean() > scores[y == 0].mean()
-
-    flags = (scores >= np.quantile(scores, 0.95)).astype(int)
-    true_positives = int(((flags == 1) & (y == 1)).sum())
-    assert true_positives > 0
+    # Round-trip through a per-record transformer call to confirm the served
+    # feature vector still matches a row in the training matrix.
+    spot_check = transformer.transform({**rows[0], **{k: rows[0][k] for k in BASE_FEATURES}})
+    assert np.allclose(spot_check, x[0])

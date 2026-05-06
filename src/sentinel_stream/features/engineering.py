@@ -1,35 +1,43 @@
-"""PySpark-based feature engineering for batch training.
+"""PySpark-based feature engineering for the AI4I predictive-maintenance dataset.
 
-The same transformations are mirrored in :mod:`sentinel_stream.features.transformer`
-for single-record inference, so training and serving use identical features.
+The same derived features are produced by the streaming transformer in
+:mod:`sentinel_stream.features.transformer` so training and serving stay
+in lockstep.
 
-PySpark is imported lazily so that importing this module does not require
-PySpark on the inference path.
+PySpark is imported lazily so importing this module does not require Spark
+on the inference path.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
-
-from .spectral import DEFAULT_BANDS, DEFAULT_WINDOW, spectral_columns
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
 
 
 BASE_FEATURES = (
-    "accelerometer_1_rms",
-    "accelerometer_2_rms",
-    "current",
-    "pressure",
-    "temperature",
-    "thermocouple",
-    "voltage",
-    "volume_flow_rate",
+    "air_temperature_k",
+    "process_temperature_k",
+    "rotational_speed_rpm",
+    "torque_nm",
+    "tool_wear_min",
 )
 
-DEFAULT_SPECTRAL_CHANNELS = ("accelerometer_1_rms", "accelerometer_2_rms")
+# "type" is a categorical {L, M, H} mapped to {1, 2, 3}.
+TYPE_ORDINAL: dict[str, int] = {"L": 1, "M": 2, "H": 3}
+
+DERIVED_FEATURES = (
+    "type_ordinal",
+    "temperature_delta_k",
+    "mechanical_power_w",
+    "wear_torque_proxy",
+    "wear_speed_proxy",
+)
+
+ALL_FEATURE_COLUMNS = (*BASE_FEATURES, *DERIVED_FEATURES)
 
 
 def get_or_create_spark(app_name: str = "sentinel-stream") -> SparkSession:
@@ -43,67 +51,45 @@ def get_or_create_spark(app_name: str = "sentinel-stream") -> SparkSession:
     )
 
 
-def build_features(
-    df: DataFrame,
-    base_features: Iterable[str] = BASE_FEATURES,
-    rolling_windows: Iterable[int] = (5, 30),
-    lag_steps: Iterable[int] = (1, 5),
-) -> DataFrame:
-    """Add rolling, lag, and time-based features to a Spark DataFrame.
+def build_features(df: DataFrame) -> DataFrame:
+    """Add engineered features to a Spark DataFrame.
 
-    Spectral columns, if present in the input DataFrame, pass through unchanged.
+    Adds:
+      * ``type_ordinal`` — encodes the categorical product variant
+      * ``temperature_delta_k`` — process minus ambient temperature
+      * ``mechanical_power_w`` — torque × angular velocity, in watts
+      * ``wear_torque_proxy`` — interaction term capturing overstrain risk
+      * ``wear_speed_proxy`` — interaction term capturing tool-fatigue risk
     """
     from pyspark.sql import functions as F
-    from pyspark.sql.window import Window
 
-    ordered = Window.orderBy("timestamp")
-
-    for col in base_features:
-        for w in rolling_windows:
-            window = ordered.rowsBetween(-(w - 1), 0)
-            df = df.withColumn(f"{col}_mean_{w}", F.avg(col).over(window))
-            df = df.withColumn(f"{col}_std_{w}", F.stddev(col).over(window))
-            df = df.withColumn(f"{col}_min_{w}", F.min(col).over(window))
-            df = df.withColumn(f"{col}_max_{w}", F.max(col).over(window))
-        for lag in lag_steps:
-            df = df.withColumn(f"{col}_lag_{lag}", F.lag(col, lag).over(ordered))
-
-    df = df.withColumn("hour", F.hour("timestamp"))
-    df = df.withColumn("dayofweek", F.dayofweek("timestamp"))
-
-    drop_after = max(rolling_windows) if rolling_windows else 0
-    drop_after = max(drop_after, max(lag_steps) if lag_steps else 0)
-    if drop_after > 0:
-        df = df.dropna()
-
+    df = df.withColumn(
+        "type_ordinal",
+        F.when(F.col("type") == "L", F.lit(TYPE_ORDINAL["L"]))
+        .when(F.col("type") == "M", F.lit(TYPE_ORDINAL["M"]))
+        .when(F.col("type") == "H", F.lit(TYPE_ORDINAL["H"]))
+        .otherwise(F.lit(TYPE_ORDINAL["L"])),
+    )
+    df = df.withColumn(
+        "temperature_delta_k",
+        F.col("process_temperature_k") - F.col("air_temperature_k"),
+    )
+    # Mechanical power = torque (Nm) × angular speed (rad/s); rpm to rad/s = 2π/60.
+    df = df.withColumn(
+        "mechanical_power_w",
+        F.col("torque_nm") * F.col("rotational_speed_rpm") * F.lit(2 * math.pi / 60.0),
+    )
+    df = df.withColumn(
+        "wear_torque_proxy",
+        F.col("torque_nm") * F.col("tool_wear_min"),
+    )
+    df = df.withColumn(
+        "wear_speed_proxy",
+        F.col("rotational_speed_rpm") * F.col("tool_wear_min"),
+    )
     return df
 
 
-def feature_columns(
-    base_features: Iterable[str] = BASE_FEATURES,
-    rolling_windows: Iterable[int] = (5, 30),
-    lag_steps: Iterable[int] = (1, 5),
-    spectral_channels: Iterable[str] = DEFAULT_SPECTRAL_CHANNELS,
-    spectral_bands: int = DEFAULT_BANDS,
-) -> list[str]:
-    """Return the deterministic ordered list of feature columns produced above."""
-    cols: list[str] = []
-    for col in base_features:
-        for w in rolling_windows:
-            cols.extend([f"{col}_mean_{w}", f"{col}_std_{w}", f"{col}_min_{w}", f"{col}_max_{w}"])
-        for lag in lag_steps:
-            cols.append(f"{col}_lag_{lag}")
-    cols.extend(["hour", "dayofweek"])
-    cols.extend(spectral_columns(spectral_channels, n_bands=spectral_bands))
-    return cols
-
-
-__all__ = [
-    "BASE_FEATURES",
-    "DEFAULT_BANDS",
-    "DEFAULT_SPECTRAL_CHANNELS",
-    "DEFAULT_WINDOW",
-    "build_features",
-    "feature_columns",
-    "get_or_create_spark",
-]
+def feature_columns(extra: Iterable[str] = ()) -> list[str]:
+    """The deterministic ordered feature list consumed by every model."""
+    return list(ALL_FEATURE_COLUMNS) + list(extra)

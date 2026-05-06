@@ -1,49 +1,46 @@
-from datetime import datetime, timedelta
+import math
 
-from sentinel_stream.features.engineering import BASE_FEATURES, feature_columns
+from sentinel_stream.features.engineering import ALL_FEATURE_COLUMNS, feature_columns
 from sentinel_stream.features.transformer import StreamingFeatureTransformer
 
 
-def test_feature_columns_deterministic_order_default():
-    # Default config disables spectral features after they degraded both
-    # detectors on SKAB; with no spectral channels the count returns to 82.
-    cols = feature_columns(spectral_channels=())
-    assert len(cols) == 82
-    assert cols[-2:] == ["hour", "dayofweek"]
+def test_feature_columns_are_deterministic():
+    cols = feature_columns()
+    assert cols == list(ALL_FEATURE_COLUMNS)
+    assert len(cols) == 10
 
 
-def test_feature_columns_with_spectral():
-    cols = feature_columns(spectral_channels=("accelerometer_1_rms",), spectral_bands=4)
-    assert len(cols) == 88  # 82 + 6 spectral features for one channel
-    assert any(c.endswith("_spec_centroid") for c in cols)
-
-
-def _record(value: float = 1.0) -> dict[str, float]:
-    return {feat: value for feat in BASE_FEATURES}
-
-
-def test_streaming_transformer_warmup():
+def test_streaming_transformer_emits_engineered_features():
     t = StreamingFeatureTransformer()
-    for _ in range(10):
-        t.push(_record())
-    assert t.transform() is None
+    record = {
+        "type": "M",
+        "air_temperature_k": 298.5,
+        "process_temperature_k": 308.5,
+        "rotational_speed_rpm": 1500.0,
+        "torque_nm": 40.0,
+        "tool_wear_min": 100.0,
+    }
+    vec = t.transform(record)
+    assert vec.shape == (10,)
+
+    by_name = dict(zip(t.feature_columns, vec.tolist(), strict=True))
+    assert by_name["type_ordinal"] == 2.0
+    assert by_name["temperature_delta_k"] == 10.0
+    expected_power = 40.0 * 1500.0 * (2 * math.pi / 60.0)
+    assert abs(by_name["mechanical_power_w"] - expected_power) < 1e-3
+    assert by_name["wear_torque_proxy"] == 40.0 * 100.0
+    assert by_name["wear_speed_proxy"] == 1500.0 * 100.0
 
 
-def test_streaming_transformer_returns_vector_after_warmup():
-    t = StreamingFeatureTransformer(spectral_channels=())
-    ts = datetime(2025, 1, 1, 12, 0, 0)
-    for i in range(40):
-        t.push(_record(value=float(i)), timestamp=ts + timedelta(seconds=i))
-    vec = t.transform()
-    assert vec is not None
-    assert vec.shape == (len(t.feature_columns),)
-
-
-def test_streaming_transformer_with_spectral_emits_extra_columns():
-    t = StreamingFeatureTransformer(spectral_channels=("accelerometer_1_rms",))
-    ts = datetime(2025, 1, 1, 12, 0, 0)
-    for i in range(80):
-        t.push(_record(value=float(i)), timestamp=ts + timedelta(seconds=i))
-    vec = t.transform()
-    assert vec is not None
-    assert vec.shape == (88,)
+def test_streaming_transformer_handles_unknown_type_safely():
+    t = StreamingFeatureTransformer()
+    record = {
+        "type": "Z",
+        "air_temperature_k": 298.0,
+        "process_temperature_k": 309.0,
+        "rotational_speed_rpm": 1400.0,
+        "torque_nm": 30.0,
+        "tool_wear_min": 50.0,
+    }
+    vec = t.transform(record)
+    assert vec[t.feature_columns.index("type_ordinal")] == 1.0
